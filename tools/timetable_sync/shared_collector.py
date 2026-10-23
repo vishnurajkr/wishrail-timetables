@@ -15,7 +15,7 @@ import time
 import requests
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
-from .pipeline import UTC, build, normalize, publish, utcnow, write_json
+from .pipeline import UTC, parse_timestamp, calendar_is_current, build, normalize, publish, utcnow, write_json
 
 class SourceUnavailable(Exception):
     def __init__(self,message,retry_after=None):
@@ -94,8 +94,8 @@ def fresh_record(path, now, hours=168):
     try:
         record=json.loads(path.read_text())
         normalized=normalize(record)
-        if normalized['valid_to'] < now.date().isoformat():return None
-        age=now-dt.datetime.fromisoformat(record['fetched_at'])
+        if not calendar_is_current(normalized,now):return None
+        age=now-parse_timestamp(record['fetched_at'])
         return record if dt.timedelta(0)<=age<dt.timedelta(hours=hours) else None
     except (OSError,ValueError,KeyError,TypeError):return None
 
@@ -105,7 +105,7 @@ def confirmed_invalid(state,now):
     result={}
     for number,receipt in state.get('source_unavailable',{}).items():
         try:
-            age=now-dt.datetime.fromisoformat(receipt['verified_at'])
+            age=now-parse_timestamp(receipt['verified_at'])
             if receipt.get('kind')=='invalid_train' and dt.timedelta(0)<=age<dt.timedelta(days=7):
                 result[number]=receipt
         except (KeyError,TypeError,ValueError):continue
@@ -121,12 +121,12 @@ def collect_shared(root, base, seconds=4800, source=None, clock=time.monotonic, 
     today=now or dt.datetime.now(UTC)
     deadline=clock()+seconds
     if not state.get('directory') or (state['directory'].get('complete') and
-       today-dt.datetime.fromisoformat(state['directory']['started_at'])>dt.timedelta(days=7)):
+       today-parse_timestamp(state['directory']['started_at'])>dt.timedelta(days=7)):
         state['directory']={'started_at':today.isoformat(),'remaining':prefixes or [f'{i:03}' for i in range(1000)],
                             'checked':{},'trains':{},'complete':False}
     directory=state['directory']; retry=state.setdefault('retry_after',{})
     blocked_until=state.get('blocked_until')
-    if blocked_until and today<dt.datetime.fromisoformat(blocked_until):
+    if blocked_until and today<parse_timestamp(blocked_until):
         report=dict(status='cooldown',downloaded=0,discovered=len(directory['trains']),
                     directory_complete=directory['complete'],blocked_until=blocked_until,finished_at=utcnow())
         write_json(root/'report.json',report)
@@ -167,7 +167,7 @@ def collect_shared(root, base, seconds=4800, source=None, clock=time.monotonic, 
                 path=records/f'{number}.json'
                 if fresh_record(path,today) is not None:continue
                 outstanding+=1
-                if number in retry and today<dt.datetime.fromisoformat(retry[number]):continue
+                if number in retry and today<parse_timestamp(retry[number]):continue
                 pending.append(number)
             # Missing express services first, then the oldest cached records.
             pending.sort(key=lambda n:(0 if n.startswith(('1','2')) else 1,
@@ -179,7 +179,7 @@ def collect_shared(root, base, seconds=4800, source=None, clock=time.monotonic, 
                             'payload':source.schedule(number)}
                     write_json(root/'raw'/f'{number}.json',record)
                     normalized=normalize(record)
-                    if normalized['valid_to'] < (now or dt.datetime.now(UTC)).date().isoformat():
+                    if not calendar_is_current(normalized,now or dt.datetime.now(UTC)):
                         raise ValueError('Source returned an expired operating calendar')
                     if str(record['payload'].get('TrainNumber'))!=number:raise ValueError('Different train returned')
                     write_json(records/f'{number}.json',record)

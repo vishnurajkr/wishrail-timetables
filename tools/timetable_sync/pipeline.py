@@ -18,7 +18,15 @@ import tempfile
 import time
 
 UTC = dt.timezone.utc
+RAILWAY_ZONE = dt.timezone(dt.timedelta(minutes=330))
 SCHEMA = 2
+
+
+def parse_timestamp(value):
+    # Python 3.10 needs an explicit offset for Dart's standard UTC Z suffix.
+    parsed=dt.datetime.fromisoformat(str(value).replace('Z','+00:00'))
+    if parsed.tzinfo is None:raise ValueError('Verification timestamp requires a timezone')
+    return parsed
 
 
 def utcnow():
@@ -132,6 +140,12 @@ def normalize(record):
                 fetched_at=record['fetched_at'], source=record.get('source', 'NTES'), stops=stops)
 
 
+def calendar_is_current(train,now):
+    # Final-day boarding can remain valid after the last origin departure date.
+    last=dt.date.fromisoformat(train['valid_to'])+dt.timedelta(days=max(s['day'] for s in train['stops'])-1)
+    return last>=now.astimezone(RAILWAY_ZONE).date()
+
+
 def collect(numbers, output, max_age_hours=24, pause=2.0, client=None):
     if client is None:
         from ntes import NTESClient
@@ -148,7 +162,7 @@ def collect(numbers, output, max_age_hours=24, pause=2.0, client=None):
         path = output / f'{number}.json'
         if path.exists():
             old = json.loads(path.read_text())
-            age = dt.datetime.now(UTC) - dt.datetime.fromisoformat(old['fetched_at'])
+            age = dt.datetime.now(UTC) - parse_timestamp(old['fetched_at'])
             if dt.timedelta(0) <= age < dt.timedelta(hours=max_age_hours):
                 report['cached'].append(number)
                 continue
@@ -195,7 +209,7 @@ def discover(prefixes, output, max_requests=50, client=None):
         if not re.fullmatch(r'\d{3,5}', prefix):
             raise ValueError('Discovery accepts three-to-five digit prefixes only')
         checked = state['checked_prefixes'].get(prefix, {}).get('checked_at')
-        if checked and dt.datetime.now(UTC) - dt.datetime.fromisoformat(checked) < dt.timedelta(hours=24):
+        if checked and dt.datetime.now(UTC) - parse_timestamp(checked) < dt.timedelta(hours=24):
             continue
         if requests:
             time.sleep(2 + random.uniform(0, 0.4))
@@ -272,7 +286,7 @@ def build(base, records, output, release_id, coverage='pilot', roster=None):
             number, stops = train['number'], train['stops']
             train_numbers.append(number)
             previous_revision=db.execute('SELECT verified_at FROM timetable_calendars WHERE train_number=?',(number,)).fetchone()
-            if previous_revision and dt.datetime.fromisoformat(previous_revision[0]) > dt.datetime.fromisoformat(train['fetched_at']):
+            if previous_revision and parse_timestamp(previous_revision[0]) > parse_timestamp(train['fetched_at']):
                 # Independent publishers must never replace a newer collected revision with an older cache.
                 continue
             for stop in stops:
