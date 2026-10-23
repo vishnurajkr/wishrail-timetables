@@ -178,7 +178,9 @@ def collect_shared(root, base, seconds=4800, source=None, clock=time.monotonic, 
                     record={'train_number':number,'source':'NTES','fetched_at':(now or dt.datetime.now(UTC)).isoformat(),
                             'payload':source.schedule(number)}
                     write_json(root/'raw'/f'{number}.json',record)
-                    normalize(record)
+                    normalized=normalize(record)
+                    if normalized['valid_to'] < (now or dt.datetime.now(UTC)).date().isoformat():
+                        raise ValueError('Source returned an expired operating calendar')
                     if str(record['payload'].get('TrainNumber'))!=number:raise ValueError('Different train returned')
                     write_json(records/f'{number}.json',record)
                     retry.pop(number,None);state.get('source_unavailable',{}).pop(number,None);report['downloaded']+=1
@@ -219,9 +221,11 @@ def prepare_release(root,base,output,release_id,base_url,key):
     if not usable:raise ValueError('No validated recent timetables to publish')
     fingerprint_hash=hashlib.sha256()
     for number,path in sorted(usable.items()):fingerprint_hash.update(path.read_bytes())
+    legacy_hash=fingerprint_hash.copy()
+    legacy_hash.update(json.dumps(roster,sort_keys=True).encode())
     fingerprint_hash.update(json.dumps({'roster':roster,'invalid':invalid},sort_keys=True).encode())
     fingerprint=fingerprint_hash.hexdigest()
-    if state.get('published_fingerprint')==fingerprint:return None
+    if state.get('published_fingerprint')==fingerprint or (not invalid and state.get('published_fingerprint')==legacy_hash.hexdigest()):return None
     import tempfile,shutil
     output.mkdir(parents=True,exist_ok=True)
     with tempfile.TemporaryDirectory(dir=output) as temp:
