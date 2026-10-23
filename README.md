@@ -4,7 +4,7 @@ The public download feed is enabled at `releases/download/timetable-latest/manif
 
 This repository contains the shared timetable collector and public timetable data only. WishRail app source is not included.
 
-The scheduled workflow resumes collection every six hours, within an 80-minute budget. Source requests are sequential and paced. Refusals pause collection for six hours. Completed train records and directory sections are checkpointed. A national label requires a complete directory and a recent validated schedule for every discovered train. Otherwise the release is explicitly partial.
+The scheduled workflow resumes collection every six hours, within an 80-minute budget. The collector targets refetching schedules after 24 hours and renewing a completed directory daily. This is a target, dependent on successful source access and available collection time. Older usable records may be retained for up to seven days with their real verification timestamps while refreshes continue. Source requests are sequential and paced. Refusals pause collection for six hours. Completed train records and directory sections are checkpointed. A national label requires a complete directory and a recent validated schedule for every discovered train. Otherwise the release is explicitly partial.
 
 ## Enable publication
 

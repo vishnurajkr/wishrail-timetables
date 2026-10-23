@@ -121,7 +121,7 @@ def collect_shared(root, base, seconds=4800, source=None, clock=time.monotonic, 
     today=now or dt.datetime.now(UTC)
     deadline=clock()+seconds
     if not state.get('directory') or (state['directory'].get('complete') and
-       today-parse_timestamp(state['directory']['started_at'])>dt.timedelta(days=7)):
+       today-parse_timestamp(state['directory']['started_at'])>dt.timedelta(days=1)):
         state['directory']={'started_at':today.isoformat(),'remaining':prefixes or [f'{i:03}' for i in range(1000)],
                             'checked':{},'trains':{},'complete':False}
     directory=state['directory']; retry=state.setdefault('retry_after',{})
@@ -165,13 +165,13 @@ def collect_shared(root, base, seconds=4800, source=None, clock=time.monotonic, 
             for number in pool:
                 if directory['complete'] and number in invalid:continue
                 path=records/f'{number}.json'
-                if fresh_record(path,today) is not None:continue
+                if fresh_record(path,today,hours=24) is not None:continue
                 outstanding+=1
                 if number in retry and today<parse_timestamp(retry[number]):continue
                 pending.append(number)
-            # Missing express services first, then the oldest cached records.
-            pending.sort(key=lambda n:(0 if n.startswith(('1','2')) else 1,
-                         (records/f'{n}.json').stat().st_mtime if (records/f'{n}.json').exists() else 0,n))
+            # Missing schedules first, then oldest cached records; express breaks ties.
+            pending.sort(key=lambda n:((records/f'{n}.json').stat().st_mtime if (records/f'{n}.json').exists() else 0,
+                         0 if n.startswith(('1','2')) else 1,n))
             for number in pending[:48]:
                 if clock()>=deadline:break
                 try:
