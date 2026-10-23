@@ -1,0 +1,13 @@
+{
+  "calendar_from": "2026-10-07",
+  "calendar_to": "2026-12-22",
+  "release_id": "ntes-pilot-20261023-amritha",
+  "built_at": "2026-10-23T04:56:29.413268+00:00",
+  "coverage": "pilot",
+  "verified_trains": 32,
+  "total_trains": 5212,
+  "legacy_trains": 5180,
+  "oldest_verified_at": "2026-10-22T11:42:34.937334+00:00",
+  "newest_verified_at": "2026-10-23T04:54:37.413499Z",
+  "schema_version": 2
+}
