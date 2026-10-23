@@ -89,7 +89,10 @@ def collect_shared(root, base, seconds=4800, source=None, clock=time.monotonic, 
     directory=state['directory']; retry=state.setdefault('retry_after',{})
     blocked_until=state.get('blocked_until')
     if blocked_until and today<dt.datetime.fromisoformat(blocked_until):
-        return dict(status='cooldown',downloaded=0,discovered=len(directory['trains']))
+        report=dict(status='cooldown',downloaded=0,discovered=len(directory['trains']),
+                    directory_complete=directory['complete'],blocked_until=blocked_until,finished_at=utcnow())
+        write_json(root/'report.json',report)
+        return report
     db=sqlite3.connect(base)
     seed={r[0] for r in db.execute('SELECT number FROM trains') if re.fullmatch(r'\d{5}',r[0])};db.close()
     report={'started_at':today.isoformat(),'downloaded':0,'directory_requests':0,'unavailable':{},'status':'budget'}

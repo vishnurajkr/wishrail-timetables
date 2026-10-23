@@ -1,5 +1,7 @@
 # WishRail timetable downloads
 
+The public download feed is enabled at `releases/download/timetable-latest/manifest.json`. Collection status is visible in the Actions run summary. A successful job may publish previously collected data while source access is paused; national freshness is not implied.
+
 This repository contains the shared timetable collector and public timetable data only. WishRail app source is not included.
 
 The scheduled workflow resumes collection every six hours, within an 80-minute budget. Source requests are sequential and paced. Refusals pause collection for six hours. Completed train records and directory sections are checkpointed. A national label requires a complete directory and a recent validated schedule for every discovered train. Otherwise the release is explicitly partial.

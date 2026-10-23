@@ -69,6 +69,32 @@ jobs:
             --seconds "$REQUESTED_SECONDS" --publish-dir public --release-id "$release_id" \
             --base-url "https://github.com/$GITHUB_REPOSITORY/releases/download/timetable-latest" \
             --key "$RUNNER_TEMP/timetable-key.pem"
+      - name: Report source access and collection progress
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PYREPORT'
+          import json,os
+          from pathlib import Path
+          path=Path('cache/report.json')
+          if not path.exists():
+              print('::warning::No collection report was produced; check earlier steps.')
+              raise SystemExit(0)
+          report=json.loads(path.read_text())
+          status=report.get('status','unknown')
+          lines=['## Timetable collection',
+              f"Status: **{status}**",
+              f"Timetables downloaded this run: {report.get('downloaded',0)}",
+              f"Trains discovered: {report.get('discovered',0)}",
+              f"Directory complete: {report.get('directory_complete',False)}"]
+          for field in ['reason','blocked_until']:
+              if report.get(field):lines.append(f"{field}: {report[field]}")
+          lines.append('A successful publishing job does not establish complete or current national coverage. Check release metadata.')
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as summary:
+              summary.write('\n\n'.join(lines)+'\n')
+          if status in ('paused','cooldown'):
+              print('::warning::Railway source collection is paused. Previously saved timetable data remains available.')
+          PYREPORT
       - name: Publish prepared update
         shell: bash
         run: |
