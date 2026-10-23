@@ -18,15 +18,19 @@ from Crypto.Util.Padding import pad, unpad
 from .pipeline import UTC, build, normalize, publish, utcnow, write_json
 
 class SourceUnavailable(Exception):
+    def __init__(self,message,retry_after=None):
+        super().__init__(message);self.retry_after=retry_after
+class TransientSourceFailure(SourceUnavailable):
     pass
 class NoTimetable(Exception):
     pass
 
 class Source:
-    def __init__(self, interval=2.0):
+    def __init__(self, interval=2.0, diagnostics_dir=None):
         self.session = requests.Session()
         self.last = 0
         self.interval = max(1.5, interval)
+        self.diagnostics_dir=Path(diagnostics_dir) if diagnostics_dir else None
     @staticmethod
     def encode(message):
         encrypted = AES.new(b'8EA4DB2CC1EB3DC5', AES.MODE_CBC, b'7DC5EB3BB4DB6EA8').encrypt(pad(message.encode(),16))
@@ -41,7 +45,7 @@ class Source:
         # Retry only transient transport failures. HTTP refusals/limits pause immediately.
         for attempt in range(3):
             try:return self._request_once(query,directory)
-            except (requests.Timeout,requests.ConnectionError):
+            except (requests.Timeout,requests.ConnectionError,TransientSourceFailure):
                 if attempt==2:raise
                 time.sleep((5,25)[attempt])
     def _request_once(self, query, directory=False):
@@ -51,7 +55,8 @@ class Source:
             json={'jsonIn':self.encode(query)}, headers={'User-Agent':'Dalvik/2.1.0 (Linux; Android 11)'},
             timeout=(15,25),allow_redirects=False,stream=True) as response:
             if response.status_code!=200:
-                raise SourceUnavailable(f'Railway source HTTP {response.status_code}; collection paused')
+                raise SourceUnavailable(f'Railway source HTTP {response.status_code}; collection paused',
+                    retry_after=int(response.headers['Retry-After']) if response.headers.get('Retry-After','').isdigit() else None)
             body=bytearray()
             for chunk in response.iter_content(64*1024):
                 body.extend(chunk)
@@ -62,7 +67,13 @@ class Source:
             data=self.decode(outer['jsonIn']) if isinstance(outer.get('jsonIn'),str) else outer
             if not isinstance(data,dict):raise ValueError('Expected timetable object')
         except (ValueError,KeyError,TypeError) as error:
-            raise SourceUnavailable('Railway source returned an unreadable response; collection paused') from error
+            if self.diagnostics_dir:
+                self.diagnostics_dir.mkdir(parents=True,exist_ok=True)
+                (self.diagnostics_dir/'last-response.bin').write_bytes(body)
+                write_json(self.diagnostics_dir/'last-error.json',dict(query=query,error=str(error),observed_at=utcnow()))
+            if re.search(br'<html|<!doctype|captcha|access denied|too many requests|blocked',bytes(body),re.I):
+                raise SourceUnavailable('Railway source returned an access/error page; collection paused') from error
+            raise TransientSourceFailure('Railway source returned an unreadable response; collection paused') from error
         alert=str(data.get('AlertMsg') or data.get('alertMsg') or '')
         if alert:
             if re.search(r'no (train|schedule)|no match found|invalid train|not found|does not exist',alert,re.I):
@@ -185,7 +196,9 @@ def collect_shared(root, base, seconds=4800, source=None, clock=time.monotonic, 
                 break
     except (SourceUnavailable,requests.RequestException) as error:
         report.update(status='paused',reason=str(error))
-        state['blocked_until']=((now or dt.datetime.now(UTC))+dt.timedelta(hours=6)).isoformat()
+        delay=dt.timedelta(minutes=10) if isinstance(error,(requests.RequestException,TransientSourceFailure)) else dt.timedelta(hours=6)
+        delay=max(delay,dt.timedelta(seconds=getattr(error,'retry_after',None) or 0))
+        state['blocked_until']=((now or dt.datetime.now(UTC))+delay).isoformat()
     finally:
         write_json(state_path,state)
         report.update(discovered=len(directory['trains']),directory_complete=directory['complete'],finished_at=utcnow())
@@ -204,8 +217,10 @@ def prepare_release(root,base,output,release_id,base_url,key):
     national=complete and set(active)<=available.keys()
     usable={n:p for n,p in available.items() if not national or n in active}
     if not usable:raise ValueError('No validated recent timetables to publish')
-    fingerprint=hashlib.sha256(b''.join(p.read_bytes() for n,p in sorted(usable.items()))+
-        json.dumps({'roster':roster,'invalid':invalid},sort_keys=True).encode()).hexdigest()
+    fingerprint_hash=hashlib.sha256()
+    for number,path in sorted(usable.items()):fingerprint_hash.update(path.read_bytes())
+    fingerprint_hash.update(json.dumps({'roster':roster,'invalid':invalid},sort_keys=True).encode())
+    fingerprint=fingerprint_hash.hexdigest()
     if state.get('published_fingerprint')==fingerprint:return None
     import tempfile,shutil
     output.mkdir(parents=True,exist_ok=True)
@@ -241,7 +256,7 @@ def main():
         state=json.loads((Path(args.root)/'state.json').read_text())
         pending=json.loads((Path(args.root)/'pending_publication.json').read_text())
         state['published_fingerprint']=pending['fingerprint'];write_json(Path(args.root)/'state.json',state);return
-    source=Source()
+    source=Source(diagnostics_dir=Path(args.root)/'source_diagnostics')
     try:print(json.dumps(collect_shared(args.root,args.base,args.seconds,source=source)))
     finally:source.close()
     if args.publish_dir:

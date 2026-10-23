@@ -224,7 +224,7 @@ def discover(prefixes, output, max_requests=50, client=None):
 def build(base, records, output, release_id, coverage='pilot', roster=None):
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,79}', release_id):
         raise ValueError('Invalid release ID')
-    normalized = [normalize(json.loads(p.read_text())) for p in sorted(Path(records).glob('[0-9]*.json'))]
+    record_paths = sorted(Path(records).glob('[0-9]*.json'))
     discovery = None
     if coverage == 'national':
         if roster is None: raise ValueError('National coverage requires complete discovery evidence')
@@ -232,8 +232,8 @@ def build(base, records, output, release_id, coverage='pilot', roster=None):
         if (not discovery.get('complete') or len(discovery.get('trains',{})) < 1000 or
             not all(f'{i:03}' in discovery.get('checked_prefixes',{}) for i in range(1000))):
             raise ValueError('National discovery is incomplete or implausibly small')
-        normalized = [train for train in normalized if train['number'] in discovery['trains']]
-    if not normalized:
+        record_paths = [path for path in record_paths if path.stem in discovery['trains']]
+    if not record_paths:
         raise ValueError('No verified timetables; refusing to create a release')
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
@@ -265,8 +265,12 @@ def build(base, records, output, release_id, coverage='pilot', roster=None):
             db.execute('DELETE FROM trains WHERE number NOT IN (SELECT number FROM active_roster)')
         if 'distance_km' not in columns:
             db.execute('ALTER TABLE schedules ADD COLUMN distance_km INTEGER')
-        for train in normalized:
+        train_numbers=[]
+        for record_path in record_paths:
+            train=normalize(json.loads(record_path.read_text()))
+            if train['number']!=record_path.stem:raise ValueError('Record filename and train number differ')
             number, stops = train['number'], train['stops']
+            train_numbers.append(number)
             previous_revision=db.execute('SELECT verified_at FROM timetable_calendars WHERE train_number=?',(number,)).fetchone()
             if previous_revision and dt.datetime.fromisoformat(previous_revision[0]) > dt.datetime.fromisoformat(train['fetched_at']):
                 # Independent publishers must never replace a newer collected revision with an older cache.
@@ -327,8 +331,8 @@ def build(base, records, output, release_id, coverage='pilot', roster=None):
         if db.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
             raise ValueError('Database integrity failure')
         # The legacy dataset has preexisting orphan records; no refreshed train may add any.
-        for train in normalized:
-            if db.execute('SELECT COUNT(*) FROM schedules s LEFT JOIN stations st ON s.station_code=st.code WHERE s.train_number=? AND st.code IS NULL',(train['number'],)).fetchone()[0]:
+        for number in train_numbers:
+            if db.execute('SELECT COUNT(*) FROM schedules s LEFT JOIN stations st ON s.station_code=st.code WHERE s.train_number=? AND st.code IS NULL',(number,)).fetchone()[0]:
                 raise ValueError('Refreshed schedule references missing stations')
         db.execute('PRAGMA journal_mode=DELETE')
         db.close()
