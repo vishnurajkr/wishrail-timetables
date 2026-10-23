@@ -38,16 +38,31 @@ class Source:
         encrypted = base64.b64decode(bytes.fromhex(value).decode())
         return json.loads(unpad(AES.new(b'8EA4DB2CC1EB3DC5',AES.MODE_CBC,b'7DC5EB3BB4DB6EA8').decrypt(encrypted),16))
     def request(self, query, directory=False):
+        # Retry only transient transport failures. HTTP refusals/limits pause immediately.
+        for attempt in range(3):
+            try:return self._request_once(query,directory)
+            except (requests.Timeout,requests.ConnectionError):
+                if attempt==2:raise
+                time.sleep((5,25)[attempt])
+    def _request_once(self, query, directory=False):
         time.sleep(max(0,self.interval-(time.monotonic()-self.last)))
         self.last = time.monotonic()
-        response = self.session.post('https://enquiry.indianrail.gov.in/crisns/AppServAnd',
+        with self.session.post('https://enquiry.indianrail.gov.in/crisns/AppServAnd',
             json={'jsonIn':self.encode(query)}, headers={'User-Agent':'Dalvik/2.1.0 (Linux; Android 11)'},
-            timeout=(15,25),allow_redirects=False)
-        if response.status_code!=200:
-            raise SourceUnavailable(f'Railway source HTTP {response.status_code}; collection paused')
-        if len(response.content)>4*1024*1024: raise SourceUnavailable('Unexpected source response size')
-        outer=response.json()
-        data=self.decode(outer['jsonIn']) if isinstance(outer.get('jsonIn'),str) else outer
+            timeout=(15,25),allow_redirects=False,stream=True) as response:
+            if response.status_code!=200:
+                raise SourceUnavailable(f'Railway source HTTP {response.status_code}; collection paused')
+            body=bytearray()
+            for chunk in response.iter_content(64*1024):
+                body.extend(chunk)
+                if len(body)>4*1024*1024:raise SourceUnavailable('Unexpected source response size')
+        try:
+            outer=json.loads(body)
+            if not isinstance(outer,dict):raise ValueError('Expected object')
+            data=self.decode(outer['jsonIn']) if isinstance(outer.get('jsonIn'),str) else outer
+            if not isinstance(data,dict):raise ValueError('Expected timetable object')
+        except (ValueError,KeyError,TypeError) as error:
+            raise SourceUnavailable('Railway source returned an unreadable response; collection paused') from error
         alert=str(data.get('AlertMsg') or data.get('alertMsg') or '')
         if alert:
             if re.search(r'no (train|schedule)|no match found|invalid train|not found|does not exist',alert,re.I):
@@ -57,7 +72,7 @@ class Source:
         return data
     def search(self,prefix):
         result=self.request(f'service=TrainRunningMob&subService=FindTrainJson&trainNo={prefix}',directory=True)
-        if not isinstance(result.get('Trains'),list):raise SourceUnavailable('Incomplete directory response')
+        if not isinstance(result.get('Trains'),list) or not all(isinstance(row,dict) for row in result['Trains']):raise SourceUnavailable('Incomplete directory response')
         return result['Trains']
     def schedule(self,number):
         return self.request(f'service=TrainRunningMob&subService=GetTrainSchedule&trainNo={number}&startDate=')
@@ -72,6 +87,18 @@ def fresh_record(path, now, hours=168):
         age=now-dt.datetime.fromisoformat(record['fetched_at'])
         return record if dt.timedelta(0)<=age<dt.timedelta(hours=hours) else None
     except (OSError,ValueError,KeyError,TypeError):return None
+
+
+def confirmed_invalid(state,now):
+    """Only explicit recent invalid-train replies resolve stale directory entries."""
+    result={}
+    for number,receipt in state.get('source_unavailable',{}).items():
+        try:
+            age=now-dt.datetime.fromisoformat(receipt['verified_at'])
+            if receipt.get('kind')=='invalid_train' and dt.timedelta(0)<=age<dt.timedelta(days=7):
+                result[number]=receipt
+        except (KeyError,TypeError,ValueError):continue
+    return result
 
 
 def collect_shared(root, base, seconds=4800, source=None, clock=time.monotonic, now=None, prefixes=None):
@@ -96,6 +123,10 @@ def collect_shared(root, base, seconds=4800, source=None, clock=time.monotonic, 
     db=sqlite3.connect(base)
     seed={r[0] for r in db.execute('SELECT number FROM trains') if re.fullmatch(r'\d{5}',r[0])};db.close()
     report={'started_at':today.isoformat(),'downloaded':0,'directory_requests':0,'unavailable':{},'status':'budget'}
+    def progress(phase,number):
+        write_json(root/'progress.json',dict(phase=phase,current=number,downloaded_this_batch=report['downloaded'],
+            discovered=len(directory['trains']),checked_prefixes=len(directory['checked']),
+            remaining_prefixes=len(directory['remaining']),updated_at=utcnow()))
     try:
         while clock()<deadline:
             advanced=False
@@ -115,10 +146,13 @@ def collect_shared(root, base, seconds=4800, source=None, clock=time.monotonic, 
                 directory['complete']=not directory['remaining']
                 report['directory_requests']+=1;advanced=True
                 write_json(state_path,state)
+                progress('directory',prefix)
             pool=set(directory['trains']) if directory['complete'] else seed|set(directory['trains'])
             pending=[]
             outstanding=0
+            invalid=confirmed_invalid(state,now or dt.datetime.now(UTC))
             for number in pool:
+                if directory['complete'] and number in invalid:continue
                 path=records/f'{number}.json'
                 if fresh_record(path,today) is not None:continue
                 outstanding+=1
@@ -132,20 +166,26 @@ def collect_shared(root, base, seconds=4800, source=None, clock=time.monotonic, 
                 try:
                     record={'train_number':number,'source':'NTES','fetched_at':(now or dt.datetime.now(UTC)).isoformat(),
                             'payload':source.schedule(number)}
+                    write_json(root/'raw'/f'{number}.json',record)
                     normalize(record)
                     if str(record['payload'].get('TrainNumber'))!=number:raise ValueError('Different train returned')
                     write_json(records/f'{number}.json',record)
-                    retry.pop(number,None);report['downloaded']+=1
+                    retry.pop(number,None);state.get('source_unavailable',{}).pop(number,None);report['downloaded']+=1
                 except (NoTimetable,ValueError,KeyError,TypeError) as error:
+                    if isinstance(error,NoTimetable):
+                        state.setdefault('source_unavailable',{})[number]={
+                            'kind':'invalid_train' if re.search(r'invalid train|does not exist',str(error),re.I) else 'no_timetable',
+                            'reason':str(error),'verified_at':(now or dt.datetime.now(UTC)).isoformat(),'source':'NTES'}
                     retry[number]=(today+dt.timedelta(hours=24)).isoformat()
                     report['unavailable'][number]=str(error)
                 advanced=True;write_json(state_path,state)
+                progress('timetable',number)
             if not advanced:
                 report['status']='complete' if directory['complete'] and not outstanding else 'waiting'
                 break
     except (SourceUnavailable,requests.RequestException) as error:
         report.update(status='paused',reason=str(error))
-        state['blocked_until']=(today+dt.timedelta(hours=6)).isoformat()
+        state['blocked_until']=((now or dt.datetime.now(UTC))+dt.timedelta(hours=6)).isoformat()
     finally:
         write_json(state_path,state)
         report.update(discovered=len(directory['trains']),directory_complete=directory['complete'],finished_at=utcnow())
@@ -158,12 +198,14 @@ def prepare_release(root,base,output,release_id,base_url,key):
     state=json.loads((root/'state.json').read_text())
     roster=state['directory']; now=dt.datetime.now(UTC)
     available={p.stem:p for p in (root/'records').glob('*.json') if fresh_record(p,now) is not None}
-    complete=roster['complete'] and len(roster['trains'])>=1000 and all(f'{i:03}' in roster['checked'] for i in range(1000))
-    national=complete and set(roster['trains'])<=available.keys()
-    usable={n:p for n,p in available.items() if not national or n in roster['trains']}
+    invalid=confirmed_invalid(state,now)
+    active={n:row for n,row in roster['trains'].items() if n not in invalid}
+    complete=roster['complete'] and len(active)>=1000 and all(f'{i:03}' in roster['checked'] for i in range(1000))
+    national=complete and set(active)<=available.keys()
+    usable={n:p for n,p in available.items() if not national or n in active}
     if not usable:raise ValueError('No validated recent timetables to publish')
     fingerprint=hashlib.sha256(b''.join(p.read_bytes() for n,p in sorted(usable.items()))+
-        json.dumps(roster,sort_keys=True).encode()).hexdigest()
+        json.dumps({'roster':roster,'invalid':invalid},sort_keys=True).encode()).hexdigest()
     if state.get('published_fingerprint')==fingerprint:return None
     import tempfile,shutil
     output.mkdir(parents=True,exist_ok=True)
@@ -171,8 +213,10 @@ def prepare_release(root,base,output,release_id,base_url,key):
         records=Path(temp)/'records';records.mkdir()
         for number,path in usable.items():shutil.copyfile(path,records/path.name)
         evidence=Path(temp)/'roster.json'
-        write_json(evidence,dict(complete=complete,trains=roster['trains'],checked_prefixes=roster['checked']))
+        write_json(evidence,dict(complete=complete,trains=active,checked_prefixes=roster['checked'],
+                    excluded_invalid_trains={n:r for n,r in invalid.items() if n in roster['trains']}))
         candidate,metadata=build(base,records,output,release_id,'national' if national else 'pilot',evidence if national else None)
+        if national:shutil.copyfile(evidence,output/(release_id+'.discovery.json'))
     if not national:
         # "pilot" is the builder's partial-coverage mode, never a national claim.
         pass

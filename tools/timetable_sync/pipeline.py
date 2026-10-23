@@ -93,10 +93,14 @@ def normalize(record):
             raise ValueError(f'{number}: invalid day')
         arrival = None if seq == 1 else clock(row.get('STA'))
         departure = None if seq == len(source_stops) else clock(row.get('STD'))
-        for value in (arrival, departure):
+        arrival_day=day
+        if arrival and departure and arrival>departure:
+            arrival_day-=1
+        if arrival_day<1:raise ValueError(f'{number}: invalid arrival day')
+        for value,event_day in ((arrival,arrival_day),(departure,day)):
             if value:
                 h, m = map(int, value.split(':')[:2])
-                minutes = (day - 1) * 1440 + h * 60 + m
+                minutes = (event_day - 1) * 1440 + h * 60 + m
                 if minutes < previous:
                     raise ValueError(f'{number}: nonmonotonic times at {code}')
                 previous = minutes
@@ -263,6 +267,10 @@ def build(base, records, output, release_id, coverage='pilot', roster=None):
             db.execute('ALTER TABLE schedules ADD COLUMN distance_km INTEGER')
         for train in normalized:
             number, stops = train['number'], train['stops']
+            previous_revision=db.execute('SELECT verified_at FROM timetable_calendars WHERE train_number=?',(number,)).fetchone()
+            if previous_revision and dt.datetime.fromisoformat(previous_revision[0]) > dt.datetime.fromisoformat(train['fetched_at']):
+                # Independent publishers must never replace a newer collected revision with an older cache.
+                continue
             for stop in stops:
                 db.execute('INSERT INTO stations(code,name,train_count) VALUES(?,?,0) '
                            'ON CONFLICT(code) DO UPDATE SET name=excluded.name',
@@ -288,7 +296,7 @@ def build(base, records, output, release_id, coverage='pilot', roster=None):
             db.executemany('INSERT INTO timetable_dates VALUES(?,?)', [(number,d) for d in train['dates']])
         db.execute('DELETE FROM station_connections')
         db.execute('''INSERT OR IGNORE INTO station_connections
-          SELECT a.station_code,b.station_code,a.train_number,a.departure,b.arrival,a.day,b.day,a.stop_sequence,b.stop_sequence
+          SELECT a.station_code,b.station_code,a.train_number,a.departure,b.arrival,a.day,CASE WHEN b.arrival>b.departure THEN b.day-1 ELSE b.day END,a.stop_sequence,b.stop_sequence
           FROM schedules a JOIN schedules b ON a.train_number=b.train_number
           WHERE b.stop_sequence=(SELECT MIN(c.stop_sequence) FROM schedules c WHERE c.train_number=a.train_number AND c.stop_sequence>a.stop_sequence)''')
         db.execute('UPDATE stations SET train_count=(SELECT COUNT(DISTINCT train_number) FROM schedules WHERE station_code=stations.code)')
@@ -309,6 +317,10 @@ def build(base, records, output, release_id, coverage='pilot', roster=None):
         metadata = dict(calendar_from=horizons[0],calendar_to=horizons[1],release_id=release_id,built_at=utcnow(),coverage=coverage,verified_trains=verified[0],
                         total_trains=total,legacy_trains=total-verified[0],oldest_verified_at=verified[1],newest_verified_at=verified[2],
                         schema_version=SCHEMA)
+        if discovery is not None:
+            metadata.update(discovered_trains=len(discovery['trains'])+len(discovery.get('excluded_invalid_trains',{})),
+                source_invalid_trains=len(discovery.get('excluded_invalid_trains',{})),
+                discovery_file=release_id+'.discovery.json',discovery_sha256=hashlib.sha256(Path(roster).read_bytes()).hexdigest())
         db.executemany('INSERT OR REPLACE INTO timetable_metadata VALUES(?,?)', [(k,json.dumps(v)) for k,v in metadata.items()])
         db.execute(f'PRAGMA user_version={SCHEMA}')
         db.commit()
@@ -344,7 +356,7 @@ def publish(database, metadata, base_url, private_key, output):
     finally:
         connection.close()
     gz = database.with_suffix('.db.gz')
-    payload = dict(metadata, format_version=1, min_app_build=1,
+    payload = dict(metadata, format_version=1, min_app_build=7,
                    url=base_url.rstrip('/')+'/'+gz.name,
                    compressed_bytes=gz.stat().st_size, database_bytes=database.stat().st_size,
                    compressed_sha256=hashlib.sha256(gz.read_bytes()).hexdigest(),

@@ -100,7 +100,9 @@ jobs:
         run: |
           if test -f public/manifest.json; then
             gh release view timetable-latest >/dev/null 2>&1 || gh release create timetable-latest --title 'WishRail timetables' --notes 'Signed offline timetable updates. Coverage is reported in each release.'
-            gh release upload timetable-latest public/*.db.gz public/*.metadata.json --clobber
+            assets=(public/*.db.gz public/*.metadata.json)
+            if compgen -G 'public/*.discovery.json' >/dev/null; then assets+=(public/*.discovery.json); fi
+            gh release upload timetable-latest "${assets[@]}"
             gh release upload timetable-latest public/manifest.json --clobber
             python -m tools.timetable_sync.shared_collector --root cache --acknowledge
           fi
