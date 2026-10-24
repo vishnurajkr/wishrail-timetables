@@ -140,6 +140,7 @@ def collect_shared(root, base, seconds=4800, source=None, clock=time.monotonic, 
             remaining_prefixes=len(directory['remaining']),updated_at=utcnow()))
     try:
         while clock()<deadline:
+            today=now or dt.datetime.now(UTC)
             advanced=False
             # Short batches provide useful partial releases before the first census ends.
             for _ in range(24):
@@ -194,7 +195,12 @@ def collect_shared(root, base, seconds=4800, source=None, clock=time.monotonic, 
                 advanced=True;write_json(state_path,state)
                 progress('timetable',number)
             if not advanced:
-                report['status']='complete' if directory['complete'] and not outstanding else 'waiting'
+                # Expiring between planning and fetching is a budget boundary,
+                # not evidence that the remaining trains are unavailable.
+                if clock()>=deadline:
+                    report['status']='budget'
+                else:
+                    report['status']='complete' if directory['complete'] and not outstanding else 'waiting'
                 break
     except (SourceUnavailable,requests.RequestException) as error:
         report.update(status='paused',reason=str(error))
@@ -217,9 +223,9 @@ def prepare_release(root,base,output,release_id,base_url,key):
     active={n:row for n,row in roster['trains'].items() if n not in invalid}
     complete=roster['complete'] and len(active)>=1000 and all(f'{i:03}' in roster['checked'] for i in range(1000))
     national=complete and set(active)<=available.keys()
-    usable={n:p for n,p in available.items() if not national or n in active}
+    usable={n:p for n,p in available.items() if n not in invalid and (not roster['complete'] or n in active)}
     if not usable:raise ValueError('No validated recent timetables to publish')
-    fingerprint_hash=hashlib.sha256()
+    fingerprint_hash=hashlib.sha256(b"verified-only-v1")
     for number,path in sorted(usable.items()):fingerprint_hash.update(path.read_bytes())
     legacy_hash=fingerprint_hash.copy()
     legacy_hash.update(json.dumps(roster,sort_keys=True).encode())

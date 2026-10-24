@@ -271,12 +271,13 @@ def build(base, records, output, release_id, coverage='pilot', roster=None):
             PRIMARY KEY(train_number, source_date));
         ''')
         columns = {r[1] for r in db.execute('PRAGMA table_info(schedules)')}
-        if discovery is not None:
-            db.execute('CREATE TEMP TABLE active_roster(number TEXT PRIMARY KEY)')
-            db.executemany('INSERT INTO active_roster VALUES(?)',[(n,) for n in discovery['trains']])
-            for table in ['timetable_dates','timetable_calendars','station_connections','schedules']:
-                db.execute(f'DELETE FROM {table} WHERE train_number NOT IN (SELECT number FROM active_roster)')
-            db.execute('DELETE FROM trains WHERE number NOT IN (SELECT number FROM active_roster)')
+        # Every published snapshot is a replacement of validated train records.
+        # Partial coverage must never preserve unverified legacy routes.
+        db.execute('CREATE TEMP TABLE active_roster(number TEXT PRIMARY KEY)')
+        db.executemany('INSERT INTO active_roster VALUES(?)',[(p.stem,) for p in record_paths])
+        for table in ['timetable_dates','timetable_calendars','station_connections','schedules']:
+            db.execute(f'DELETE FROM {table} WHERE train_number NOT IN (SELECT number FROM active_roster)')
+        db.execute('DELETE FROM trains WHERE number NOT IN (SELECT number FROM active_roster)')
         if 'distance_km' not in columns:
             db.execute('ALTER TABLE schedules ADD COLUMN distance_km INTEGER')
         train_numbers=[]
