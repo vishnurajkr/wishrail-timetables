@@ -225,6 +225,25 @@ def prepare_release(root,base,output,release_id,base_url,key):
     national=complete and set(active)<=available.keys()
     usable={n:p for n,p in available.items() if n not in invalid and (not roster['complete'] or n in active)}
     if not usable:raise ValueError('No validated recent timetables to publish')
+    # Another publisher may have a smaller checkpoint than the public baseline.
+    # Defer rather than replacing valid public coverage with its older subset.
+    with sqlite3.connect(base) as baseline:
+        has_calendar=baseline.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='timetable_calendars'").fetchone()
+        if has_calendar:
+            retained=set()
+            for number,verified,end,last_day in baseline.execute(
+                'SELECT c.train_number,c.verified_at,c.valid_to,COALESCE(MAX(s.day),1) FROM timetable_calendars c LEFT JOIN schedules s ON s.train_number=c.train_number GROUP BY c.train_number'):
+                if number in invalid or (roster['complete'] and number not in active):continue
+                try:
+                    age=now-parse_timestamp(verified)
+                    last=dt.date.fromisoformat(end)+dt.timedelta(days=max(1,last_day)-1)
+                    if dt.timedelta(0)<=age<dt.timedelta(days=7) and last>=(now+dt.timedelta(hours=5,minutes=30)).date():retained.add(number)
+                except (ValueError,TypeError):continue
+            missing=retained-usable.keys()
+            if missing:
+                print(f'Publication deferred: checkpoint lacks {len(missing)} still-valid public revisions; public snapshot retained.',flush=True)
+                return None
+
     fingerprint_hash=hashlib.sha256(b"verified-only-v1")
     for number,path in sorted(usable.items()):fingerprint_hash.update(path.read_bytes())
     legacy_hash=fingerprint_hash.copy()
