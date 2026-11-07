@@ -1,0 +1,21 @@
+name: Diagnose railway source access
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  source-access:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Check DNS, connection and one public schedule
+        run: python -m tools.timetable_sync.network_diagnostic
