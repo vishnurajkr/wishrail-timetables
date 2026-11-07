@@ -224,7 +224,11 @@ def prepare_release(root,base,output,release_id,base_url,key):
     complete=roster['complete'] and len(active)>=1000 and all(f'{i:03}' in roster['checked'] for i in range(1000))
     national=complete and set(active)<=available.keys()
     usable={n:p for n,p in available.items() if n not in invalid and (not roster['complete'] or n in active)}
-    if not usable:raise ValueError('No validated recent timetables to publish')
+    if not usable:
+        reason='No recent validated schedules are available; keeping the public snapshot unchanged.'
+        write_json(root/'publication.json',{'status':'deferred','reason':reason,'checked_at':utcnow()})
+        print('Publication deferred: '+reason,flush=True)
+        return None
     # Another publisher may have a smaller checkpoint than the public baseline.
     # Defer rather than replacing valid public coverage with its older subset.
     with sqlite3.connect(base) as baseline:
@@ -241,7 +245,9 @@ def prepare_release(root,base,output,release_id,base_url,key):
                 except (ValueError,TypeError):continue
             missing=retained-usable.keys()
             if missing:
-                print(f'Publication deferred: checkpoint lacks {len(missing)} still-valid public revisions; public snapshot retained.',flush=True)
+                reason=f'Checkpoint lacks {len(missing)} still-valid public revisions; public snapshot retained.'
+                write_json(root/'publication.json',{'status':'deferred','reason':reason,'checked_at':utcnow()})
+                print('Publication deferred: '+reason,flush=True)
                 return None
 
     fingerprint_hash=hashlib.sha256(b"verified-only-v1")
@@ -250,7 +256,9 @@ def prepare_release(root,base,output,release_id,base_url,key):
     legacy_hash.update(json.dumps(roster,sort_keys=True).encode())
     fingerprint_hash.update(json.dumps({'roster':roster,'invalid':invalid},sort_keys=True).encode())
     fingerprint=fingerprint_hash.hexdigest()
-    if state.get('published_fingerprint')==fingerprint or (not invalid and state.get('published_fingerprint')==legacy_hash.hexdigest()):return None
+    if state.get('published_fingerprint')==fingerprint or (not invalid and state.get('published_fingerprint')==legacy_hash.hexdigest()):
+        write_json(root/'publication.json',{'status':'unchanged','checked_at':utcnow()})
+        return None
     import tempfile,shutil
     output.mkdir(parents=True,exist_ok=True)
     with tempfile.TemporaryDirectory(dir=output) as temp:
@@ -267,6 +275,7 @@ def prepare_release(root,base,output,release_id,base_url,key):
     publish(candidate,metadata,base_url,key,output/'manifest.json')
     # Only publication acknowledgement commits this fingerprint; failed uploads retry.
     write_json(root/'pending_publication.json',{'fingerprint':fingerprint,'release_id':release_id})
+    write_json(root/'publication.json',{'status':'prepared','release_id':release_id,'checked_at':utcnow()})
     return candidate,metadata
 
 

@@ -14,3 +14,8 @@ The scheduled workflow resumes collection every six hours, within an 80-minute b
 4. The app checks `releases/download/timetable-latest/manifest.json`. The manifest is uploaded after its immutable database asset.
 
 A first national collection takes multiple runs. Partial snapshots contain validated schedules only; unverified legacy trains are removed, so partial coverage is never a current national timetable. Public endpoints are an unofficial integration and can change. Source fetch times and calendar limits remain visible.
+
+
+## Outages and checkpoint recovery
+
+The workflow merges the local collector's published checkpoint before collection, importing only newer validated records and retaining newer GitHub revisions. If the railway source is unreachable and no recent schedules remain, publication is explicitly deferred and the public download stays unchanged. A green run with a paused/deferred summary is not a successful data refresh. Processing, signing and upload errors still fail the workflow. Regression tests run before collection.

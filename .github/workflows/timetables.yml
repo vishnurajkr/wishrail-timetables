@@ -27,6 +27,8 @@ jobs:
           python-version: '3.12'
       - name: Install collector dependencies
         run: pip install -r requirements.txt
+      - name: Test collector and checkpoint recovery
+        run: python -m unittest tools.timetable_sync.test_pipeline tools.timetable_sync.test_shared_collector tools.timetable_sync.test_checkpoint_restore
       - name: Restore collector checkpoints and previous release
         shell: bash
         run: |
@@ -40,6 +42,10 @@ jobs:
           with tarfile.open('incoming/checkpoint.tar.gz') as archive:
               archive.extractall('.', filter='data')
           PY
+          fi
+          if gh release view collector-local-state >/dev/null 2>&1; then
+            gh release download collector-local-state -p local-checkpoint.tar.gz -D incoming
+            python -m tools.timetable_sync.checkpoint_restore incoming/local-checkpoint.tar.gz cache
           fi
           gzip -dc assets/data/wishrail.db.gz > base.db
           if gh release view timetable-latest >/dev/null 2>&1; then
@@ -89,6 +95,12 @@ jobs:
               f"Directory complete: {report.get('directory_complete',False)}"]
           for field in ['reason','blocked_until']:
               if report.get(field):lines.append(f"{field}: {report[field]}")
+          publication=Path('cache/publication.json')
+          if publication.exists():
+              result=json.loads(publication.read_text())
+              lines.append(f"Publication: **{result['status']}**")
+              if result.get('reason'):lines.append(result['reason'])
+              if result['status']=='deferred':print('::warning::'+result['reason'])
           lines.append('A successful publishing job does not establish complete or current national coverage. Check release metadata.')
           with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as summary:
               summary.write('\n\n'.join(lines)+'\n')
